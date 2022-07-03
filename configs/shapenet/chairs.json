@@ -1,6 +1,6 @@
 {
-    "dataset_root": "./data/shapenetchairs/chairs/03001627",
-    "splits_path": "./data/shapenetchairs/chair_splits.json",
+    "dataset_root": "/content/03001627",
+    "splits_path": "chair_splits.json",
 
     "max_freq": 8,
     "num_freqs": 20,
