@@ -3,9 +3,10 @@
     "splits_path": "chair_splits.json",
     
     "max_iters": 100001,
-    "val_freq": 1000,
-    "checkpoint_freq": 5000,
-    "checkpoint_path":"/content/drive/MyDrive/NeRF/meta-ngp_checkpoints/",
+    "val_freq": 500,
+    "max_val_size": 5,
+    "checkpoint_freq": 500,
+    "checkpoint_path":"/content/drive/MyDrive/NeRF/meta_mipNerf_checkpoints/",
 
     "max_freq": 8,
     "num_freqs": 20,

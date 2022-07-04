@@ -2,7 +2,7 @@ import torch
 from einops import rearrange
 import numpy as np
 from functorch import jacrev, vmap
-from rendering import Rays_keys, Rays
+from models.rendering import Rays_keys, Rays
 
 def lift_gaussian(directions, t_mean, t_var, r_var, diagonal):
     """Lift a Gaussian defined along a ray to 3D coordinates."""

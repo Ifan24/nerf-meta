@@ -332,7 +332,7 @@ class MipNerf(nn.Module):
 
 
 # use default args to build mipNerf
-def build_MipNerf(args):
+def build_MipNerf():
     model = MipNerf()
     return model
     

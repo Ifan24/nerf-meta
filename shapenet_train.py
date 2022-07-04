@@ -3,12 +3,15 @@ import json
 import copy
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from datasets.shapenet import build_shapenet
 from models.nerf import build_nerf, build_MipNerf
 from models.rendering import get_rays_shapenet, sample_points, volume_render, get_d, get_rays_shapenet_mipNerf, get_raybatch
-from tqdm import tqdm as tqdm
+from models.mip import rearrange_render_image
+from tqdm.notebook import tqdm as tqdm
 import matplotlib.pyplot as plt
+from models.rendering import Rays_keys, Rays
+
 
 def calc_mse(x: torch.Tensor, y: torch.Tensor):
     """
@@ -64,79 +67,72 @@ def inner_loop(model, optim, imgs, poses, hwf, bound, num_samples, raybatch_size
         #     for (rgb, _, _) in ret:
         #         psnrs.append(calc_psnr(rgb, rgbs[..., :3]))
         #     psnr_corse, psnr_fine = psnrs
+    # return psnr_fine
             
-            
-    # rays_o, rays_d = get_rays_shapenet(hwf, poses)
-    # rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
 
-    # for step in range(inner_steps):
-    #     indices = torch.randint(num_rays, size=[raybatch_size])
-    #     raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
-    #     pixelbatch = pixels[indices] 
-    #     t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
-    #                                 num_samples, perturb=True)
-    #     # xyz = [B, N, 3]
-    #     input_shape = xyz.shape
-    #     viewdirs = get_d(raybatch_d, xyz.shape[-2])
-        
-    #     optim.zero_grad()
-    #     rgbs, sigmas = model(xyz, viewdirs)
-        
-    #     colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
-        # loss = F.mse_loss(colors, pixelbatch)
-        # loss.backward()
-        # optim.step()
+def render_image(model, rays, rgbs, val_chunk_size):
+    height, width, _ = rgbs.shape  # H W C
+    single_image_rays, val_mask = rearrange_render_image(rays, val_chunk_size)
+    coarse_rgb, fine_rgb = [], []
+    with torch.no_grad():
+        for batch_rays in single_image_rays:
+            (c_rgb, _, _), (f_rgb, _, _) = model(batch_rays, False)
+            coarse_rgb.append(c_rgb)
+            fine_rgb.append(f_rgb)
 
-def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size, show_one):
+    coarse_rgb = torch.cat(coarse_rgb, dim=0)
+    fine_rgb = torch.cat(fine_rgb, dim=0)
+
+    coarse_rgb = coarse_rgb.reshape(1, height, width, coarse_rgb.shape[-1])  # N H W C
+    fine_rgb = fine_rgb.reshape(1, height, width, fine_rgb.shape[-1])  # N H W C
+    return coarse_rgb, fine_rgb, val_mask
+        
+    
+def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size):
     """
     report view-synthesis result on heldout views
     """
-    ray_origins, ray_directions = get_rays_shapenet(hwf, poses)
-
+    coarse_loss_mult = 0.2
+    rays = get_rays_shapenet_mipNerf(hwf, poses)
+    
     view_psnrs = []
-    for img, rays_o, rays_d in zip(imgs, ray_origins, ray_directions):
-        rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
-        t_vals, xyz = sample_points(rays_o, rays_d, bound[0], bound[1],
-                                    num_samples, perturb=False)
-        viewdirs = get_d(rays_d, xyz.shape[-2])
+    for i in range(imgs.shape[0]):
+        img = imgs[i]
+        ray = Rays(
+            origins=rays.origins[i],
+            directions=rays.directions[i],
+            viewdirs=rays.viewdirs[i],
+            radii=rays.radii[i],
+            lossmult=rays.lossmult[i],
+            near=rays.near[i],
+            far=rays.far[i]
+        )
         
-        synth = []
-        num_rays = rays_d.shape[0]
-        with torch.no_grad():
-            for i in range(0, num_rays, raybatch_size):
-                input_shape = xyz[i:i+raybatch_size].shape
-                xyz_batch = xyz[i:i+raybatch_size]
-                xyz_batch = xyz_batch.reshape([-1,3])
-
-                viewdir_batch = viewdirs[i:i+raybatch_size]
-                viewdir_batch = viewdir_batch.reshape([-1,3])
-
-                sigmas, rgbs = model(xyz_batch, viewdir_batch)
-
-                # unflatten batch ray
-                sigmas_batch = sigmas.reshape(input_shape[:-1])
-                rgbs_batch = rgbs.reshape(input_shape)
-
-                color_batch = volume_render(rgbs_batch, sigmas_batch, 
-                                            t_vals[i:i+raybatch_size],
-                                            white_bkgd=True)
-                synth.append(color_batch)
-            synth = torch.clip(torch.cat(synth, dim=0).reshape_as(img), min=0, max=1)
-            error = F.mse_loss(img, synth)
-            psnr = -10*torch.log10(error)
-            view_psnrs.append(psnr)
+        rgb_gt = img[..., :3]
+        coarse_rgb, fine_rgb, val_mask = render_image(model, ray, img, raybatch_size)
+    
+        val_mse_coarse = (val_mask * (coarse_rgb - rgb_gt) ** 2).sum() / val_mask.sum()
+        val_mse_fine = (val_mask * (fine_rgb - rgb_gt) ** 2).sum() / val_mask.sum()
+    
+        val_loss = coarse_loss_mult * val_mse_coarse + val_mse_fine
+        val_psnr_fine = calc_psnr(fine_rgb, rgb_gt)
+        view_psnrs.append(val_psnr_fine)
+    
+    fig = plt.figure(figsize=(15, 6))   
+    plt.subplot(1, 3, 1)
+    plt.imshow(img.cpu())
+    plt.title('gt')
+    plt.subplot(1, 3, 2)
+    plt.imshow(coarse_rgb.squeeze(0).cpu())
+    plt.title('coarse_rgb')
+    plt.subplot(1, 3, 3)
+    plt.imshow(fine_rgb.squeeze(0).cpu())
+    plt.title('fine_rgb')
+    fig.suptitle(f'psnr:{val_psnr_fine:0.3f}',fontweight ="bold")
+    fig.tight_layout()
+    plt.show()
     
     scene_psnr = torch.stack(view_psnrs).mean()
-    
-    if show_one:
-      plt.figure(figsize=(15, 5))   
-      plt.subplot(1, 2, 1)
-      plt.imshow(img.cpu())
-      plt.subplot(1, 2, 2)
-      plt.imshow(synth.cpu())
-      plt.title(f'psnr:{scene_psnr:0.3f}')
-      plt.show()
-      
     return scene_psnr
 
 def val_meta(args, model, val_loader, device):
@@ -146,7 +142,6 @@ def val_meta(args, model, val_loader, device):
     meta_trained_state = model.state_dict()
     val_model = copy.deepcopy(model)
     # show one of the validation result
-    show_one = True
     val_psnrs = []
     for imgs, poses, hwf, bound in tqdm(val_loader, desc = 'Validating'):
         imgs, poses, hwf, bound = imgs.to(device), poses.to(device), hwf.to(device), bound.to(device)
@@ -162,8 +157,7 @@ def val_meta(args, model, val_loader, device):
                     bound, args.num_samples, args.tto_batchsize, args.tto_steps)
         
         scene_psnr = report_result(val_model, test_imgs, test_poses, hwf, bound, 
-                                    args.num_samples, args.test_batchsize, show_one)
-        show_one = False
+                                    args.num_samples, args.test_batchsize)
         val_psnrs.append(scene_psnr)
 
     val_psnr = torch.stack(val_psnrs).mean()
@@ -190,6 +184,7 @@ def main():
     val_set = build_shapenet(image_set="val", dataset_root=args.dataset_root,
                             splits_path=args.splits_path,
                             num_views=args.tto_views+args.test_views)
+    val_set = Subset(val_set, range(0, args.max_val_size))
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
 
     # meta_model = build_nerf(args)
@@ -223,24 +218,24 @@ def main():
             
             meta_optim.step()
         
-        if step % args.val_freq == 0 and step != 0:
-            val_psnr = val_meta(args, meta_model, val_loader, device)
-            print(f"step: {step}, val psnr: {val_psnr:0.3f}")
-            val_psnrs.append(val_psnr)
-      
-        if step % args.checkpoint_freq == 0 and step != 0:
-            path = f"{args.checkpoint_path}/step{step}.pth"
-            torch.save({
-                'epoch': step,
-                'meta_model_state_dict': meta_model.state_dict(),
-                'meta_optim_state_dict': meta_optim.state_dict(),
-                }, path)
-        
-        step += 1
-        pbar.update(1)
-        
-        if step > args.max_iters:
-          break
+            if step % args.val_freq == 0 and step != 0:
+                val_psnr = val_meta(args, meta_model, val_loader, device)
+                print(f"step: {step}, val psnr: {val_psnr:0.3f}")
+                val_psnrs.append(val_psnr)
+          
+            if step % args.checkpoint_freq == 0 and step != 0:
+                path = f"{args.checkpoint_path}/step{step}.pth"
+                torch.save({
+                    'epoch': step,
+                    'meta_model_state_dict': meta_model.state_dict(),
+                    'meta_optim_state_dict': meta_optim.state_dict(),
+                    }, path)
+            
+            step += 1
+            pbar.update(1)
+            
+            if step > args.max_iters:
+              break
         
     pbar.close()
     
