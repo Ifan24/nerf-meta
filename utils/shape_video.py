@@ -1,7 +1,7 @@
 import math
 import imageio
 import torch
-from models.rendering import get_rays_shapenet, sample_points, volume_render
+from models.rendering import get_rays_shapenet, sample_points, volume_render, get_d
 
 
 def create_posemat(radius, theta, phi):
@@ -66,12 +66,24 @@ def create_360_video(args, model, hwf, bound, device, scene_id, savedir):
         rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
         t_vals, xyz = sample_points(rays_o, rays_d, bound[0], bound[1],
                                     args.num_samples, perturb=False)
-        
+        viewdirs = get_d(rays_d, xyz.shape[-2])
         synth = []
         num_rays = rays_d.shape[0]
         with torch.no_grad():
             for i in range(0, num_rays, args.test_batchsize):
-                rgbs_batch, sigmas_batch = model(xyz[i:i+args.test_batchsize])
+                input_shape = xyz[i:i+test_batchsize].shape
+                xyz_batch = xyz[i:i+test_batchsize]
+                xyz_batch = xyz_batch.reshape([-1,3])
+
+                viewdir_batch = viewdirs[i:i+test_batchsize]
+                viewdir_batch = viewdir_batch.reshape([-1,3])
+
+                sigmas, rgbs = model(xyz_batch, viewdir_batch)
+
+                # unflatten batch ray
+                sigmas_batch = sigmas.reshape(input_shape[:-1])
+                rgbs_batch = rgbs.reshape(input_shape)
+                
                 color_batch = volume_render(rgbs_batch, sigmas_batch,
                                             t_vals[i:i+args.test_batchsize],
                                             white_bkgd=True)

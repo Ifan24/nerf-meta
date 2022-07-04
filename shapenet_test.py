@@ -7,7 +7,9 @@ from torch.utils.data import DataLoader
 from datasets.shapenet import build_shapenet
 from models.nerf import build_nerf
 from utils.shape_video import create_360_video
-from models.rendering import get_rays_shapenet, sample_points, volume_render
+from models.rendering import get_rays_shapenet, sample_points, volume_render, get_d
+from tqdm import tqdm as tqdm
+import matplotlib.pyplot as plt
 
 
 def test_time_optimize(args, model, optim, imgs, poses, hwf, bound):
@@ -20,17 +22,31 @@ def test_time_optimize(args, model, optim, imgs, poses, hwf, bound):
     rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
 
     num_rays = rays_d.shape[0]
-    for step in range(args.tto_steps):
+    tepoch = tqdm(range(args.tto_steps), desc = 'Training')
+    for step in tepoch:
         indices = torch.randint(num_rays, size=[args.tto_batchsize])
         raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
         pixelbatch = pixels[indices] 
         t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
                                     args.num_samples, perturb=True)
+        input_shape = xyz.shape
+        viewdirs = get_d(raybatch_d, xyz.shape[-2])
         
         optim.zero_grad()
-        rgbs, sigmas = model(xyz)
+        
+        # flatten batch ray
+        xyzs = xyzs.reshape([-1,3])
+        viewdirs = viewdirs.reshape([-1,3])
+        
+        sigmas, rgbs = model(xyzs, viewdirs)
+        
+        # unflatten batch ray
+        sigmas = sigmas.reshape(input_shape[:-1])
+        rgbs = rgbs.reshape(input_shape)
+        
         colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
         loss = F.mse_loss(colors, pixelbatch)
+        tepoch.set_postfix(loss=loss.item())
         loss.backward()
         optim.step()
 
@@ -42,24 +58,55 @@ def report_result(args, model, imgs, poses, hwf, bound):
     ray_origins, ray_directions = get_rays_shapenet(hwf, poses)
 
     view_psnrs = []
+    
+    if args.tto_views == 1:
+        plt.imshow(imgs[0])
+        plt.title('Input Image')
+        plt.show()
+        
+    plt.figure(figsize=(15,6))
+    count = 0
     for img, rays_o, rays_d in zip(imgs, ray_origins, ray_directions):
         rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
         t_vals, xyz = sample_points(rays_o, rays_d, bound[0], bound[1],
                                     args.num_samples, perturb=False)
-        
+        viewdirs = get_d(rays_d, xyz.shape[-2])
         synth = []
         num_rays = rays_d.shape[0]
+        
         with torch.no_grad():
             for i in range(0, num_rays, args.test_batchsize):
-                rgbs_batch, sigmas_batch = model(xyz[i:i+args.test_batchsize])
+                input_shape = xyz[i:i+args.test_batchsize].shape
+                xyz_batch = xyz[i:i+args.test_batchsize]
+                xyz_batch = xyz_batch.reshape([-1,3])
+
+                viewdir_batch = viewdirs[i:i+args.test_batchsize]
+                viewdir_batch = viewdir_batch.reshape([-1,3])
+
+                sigmas, rgbs = model(xyz_batch, viewdir_batch)
+
+                # unflatten batch ray
+                sigmas_batch = sigmas.reshape(input_shape[:-1])
+                rgbs_batch = rgbs.reshape(input_shape)
+
                 color_batch = volume_render(rgbs_batch, sigmas_batch,
                                             t_vals[i:i+args.test_batchsize],
                                             white_bkgd=True)
                 synth.append(color_batch)
-            synth = torch.cat(synth, dim=0).reshape_as(img)
+            synth = torch.clip(torch.cat(synth, dim=0).reshape_as(img), min=0, max=1)
             error = F.mse_loss(img, synth)
             psnr = -10*torch.log10(error)
             view_psnrs.append(psnr)
+            
+        if count < args.tto_showImages:
+            plt.subplot(2,5,count+1)
+            plt.imshow(img.cpu())
+            plt.title('Target')
+            plt.subplot(2,5,count+6)
+            plt.imshow(synth.cpu())
+            plt.title('Reconstruction')
+        count += 1
+    plt.show()
     
     scene_psnr = torch.stack(view_psnrs).mean()
     return scene_psnr
