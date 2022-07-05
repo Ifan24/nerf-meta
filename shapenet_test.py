@@ -32,6 +32,13 @@ def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_pos
     test_rays = get_rays_shapenet_mipNerf(hwf, test_poses)
     train_val_freq = args.train_val_freq
     
+    
+    if args.tto_views == 1:
+        plt.figure()
+        plt.imshow(tto_imgs[0].cpu())
+        plt.title('Input Image')
+        plt.show()
+        
     # plt_groups = {'Test PSNR':[]}
     # plotlosses_model = PlotLosses(groups=plt_groups)
     # plt_groups['Test PSNR'].append('test')
