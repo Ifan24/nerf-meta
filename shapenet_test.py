@@ -30,6 +30,7 @@ def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_pos
     indices = torch.randint(len(raybatch), size=[args.train_val_steps])
     
     test_rays = get_rays_shapenet_mipNerf(hwf, test_poses)
+    train_val_freq = args.train_val_freq
     
     # plt_groups = {'Test PSNR':[]}
     # plotlosses_model = PlotLosses(groups=plt_groups)
@@ -56,7 +57,7 @@ def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_pos
         
         with torch.no_grad():
             # validation
-            if step % args.train_val_freq == 0 and step != 0:
+            if step % train_val_freq == 0 and step != 0:
                 view_psnrs = []
                 plt.figure(figsize=(15, 6))
                 count = 0
@@ -107,6 +108,17 @@ def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_pos
 
                 # plotlosses_model.update({'test':scene_psnr}, current_step=step)
                 # plotlosses_model.send()
+            
+            # step           = 100 -> 1000 -> 10000 -> 50000
+            # train_val_freq = 100 -> 500  -> 2500  -> 5000
+            if step <= 1000:
+                train_val_freq = 100
+            elif step > 1000 and step <= 10000:
+                train_val_freq = 500
+            elif step > 10000 and step <= 50000:
+                train_val_freq = 2500
+            elif step > 50000 and step <= 100000:
+                train_val_freq = 5000
                 
     print(val_psnrs)
     
