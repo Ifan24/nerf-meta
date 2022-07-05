@@ -182,12 +182,15 @@ def main():
 
     train_set = build_shapenet(image_set="train", dataset_root=args.dataset_root,
                                 splits_path=args.splits_path, num_views=args.train_views)
+    if args.max_train_size != 0:
+        train_set = Subset(train_set, range(0, args.max_train_size))
     train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
 
     val_set = build_shapenet(image_set="val", dataset_root=args.dataset_root,
                             splits_path=args.splits_path,
                             num_views=args.tto_views+args.test_views)
-    val_set = Subset(val_set, range(0, args.max_val_size))
+    if args.max_val_size != 0:
+        val_set = Subset(val_set, range(0, args.max_val_size))
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
 
     # meta_model = build_nerf(args)
@@ -203,9 +206,9 @@ def main():
 
     meta_optim = torch.optim.Adam(meta_model.parameters(), lr=args.meta_lr)
     
-    step = args.resume_step+1
+    step = args.resume_step
     pbar = tqdm(total=args.max_iters, desc = 'Training')
-    pbar.update(args.resume_step+1)
+    pbar.update(args.resume_step)
     val_psnrs = []
     
     while step < args.max_iters:
@@ -229,12 +232,12 @@ def main():
             
             meta_optim.step()
         
-            if step % args.val_freq == 0 and step != 0:
+            if step % args.val_freq == 0 and step != args.resume_step:
                 val_psnr = val_meta(args, meta_model, val_loader, device)
                 print(f"step: {step}, val psnr: {val_psnr:0.3f}")
-                val_psnrs.append(val_psnr)
+                val_psnrs.append((step, val_psnr))
           
-            if step % args.checkpoint_freq == 0 and step != 0:
+            if step % args.checkpoint_freq == 0 and step != args.resume_step:
                 path = f"{args.checkpoint_path}/step{step}.pth"
                 torch.save({
                     'epoch': step,
@@ -249,6 +252,7 @@ def main():
               break
         
     pbar.close()
+    print(val_psnrs)
     
 
 if __name__ == '__main__':

@@ -6,11 +6,11 @@
     "val_freq": 500,
     "max_val_size": 5,
     "max_test_size": 30,
-    "max_train_size": 0,
+    "max_train_size": 500,
     "train_val_steps": 100001,
     "train_val_freq": 1000,
     "checkpoint_freq": 500,
-    "checkpoint_path":"/content/drive/MyDrive/NeRF/meta_mipNerf_checkpoints/",
+    "checkpoint_path":"/content/drive/MyDrive/NeRF/meta_mipNerf_checkpoints/train_500",
 
     "max_freq": 8,
     "num_freqs": 20,

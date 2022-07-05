@@ -151,7 +151,8 @@ def test():
     test_set = build_shapenet(image_set="test", dataset_root=args.dataset_root,
                             splits_path=args.splits_path,
                             num_views=args.tto_views+args.test_views)
-    test_set = Subset(test_set, range(0, args.max_test_size))
+    if args.max_test_size != 0:
+        test_set = Subset(test_set, range(0, args.max_test_size))
     test_loader = DataLoader(test_set, batch_size=1, shuffle=False)
 
     model = build_MipNerf()
