@@ -127,14 +127,10 @@ def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size, tt
             plt.imshow(img.cpu())
             plt.title('Target')
             plt.subplot(2,5,count+6)
-            # plt.imshow(coarse_rgb.squeeze(0).cpu())
-            # plt.title('coarse_rgb')
-            # plt.subplot(1, 3, 3)
             plt.imshow(fine_rgb.cpu())
             plt.title(f'synth psnr:{val_psnr_fine:0.2f}')
         count += 1
         
-    # fig.suptitle(f'psnr:{val_psnr_fine:0.3f}',fontweight ="bold")
     plt.show()
     
     scene_psnr = torch.stack(view_psnrs).mean()
@@ -173,6 +169,8 @@ def main():
     parser = argparse.ArgumentParser(description='shapenet few-shot view synthesis')
     parser.add_argument('--config', type=str, required=True,
                         help='config file for the shape class (cars, chairs or lamps)')
+    parser.add_argument('--resume_step', type=int, default=0,
+                        help='resume training from step')
     args = parser.parse_args()
 
     with open(args.config) as config:
@@ -195,11 +193,19 @@ def main():
     # meta_model = build_nerf(args)
     meta_model = build_MipNerf()
     meta_model.to(device)
+    
+    if args.resume_step != 0:
+        weight_path = f"{args.checkpoint_path}/step{args.resume_step}.pth"
+        checkpoint = torch.load(weight_path, map_location=device)
+        meta_state = checkpoint['meta_model_state_dict']
+        meta_model.load_state_dict(meta_state)
+
 
     meta_optim = torch.optim.Adam(meta_model.parameters(), lr=args.meta_lr)
     
-    step = 0
+    step = args.resume_step+1
     pbar = tqdm(total=args.max_iters, desc = 'Training')
+    pbar.update(args.resume_step+1)
     val_psnrs = []
     
     while step < args.max_iters:

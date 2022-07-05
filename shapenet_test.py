@@ -99,8 +99,9 @@ def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_pos
                 plt.figure()
                 scene_psnr = torch.stack(view_psnrs).mean().item()
                 val_psnrs.append((step, scene_psnr))
+                print(f"step: {step}, val psnr: {scene_psnr:0.3f}")
                 plt.plot(*zip(*val_psnrs), label="val_psnr")
-                plt.title('ShapeNet Reconstruction from 25 views')
+                plt.title(f'ShapeNet Reconstruction from {args.tto_views} views')
                 plt.xlabel('Iterations')
                 plt.ylabel('PSNR')
                 plt.legend()
@@ -109,8 +110,8 @@ def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_pos
                 # plotlosses_model.update({'test':scene_psnr}, current_step=step)
                 # plotlosses_model.send()
             
-            # step           = 100 -> 1000 -> 10000 -> 50000
-            # train_val_freq = 100 -> 500  -> 2500  -> 5000
+            # step           = <1000 -> <10000 -> <50000 -> <100000
+            # train_val_freq = 100   -> 500    -> 2500   -> 5000
             if step <= 1000:
                 train_val_freq = 100
             elif step > 1000 and step <= 10000:
