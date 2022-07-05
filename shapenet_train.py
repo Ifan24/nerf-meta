@@ -66,7 +66,7 @@ def inner_loop(model, optim, imgs, poses, hwf, bound, num_samples, raybatch_size
         #     psnrs = []
         #     for (rgb, _, _) in ret:
         #         psnrs.append(calc_psnr(rgb, rgbs[..., :3]))
-        #     psnr_corse, psnr_fine = psnrs
+        #     psnr_corse, psnr_fine = psnrs        
     # return psnr_fine
             
 
@@ -88,7 +88,7 @@ def render_image(model, rays, rgbs, val_chunk_size):
     return coarse_rgb, fine_rgb, val_mask
         
     
-def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size):
+def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size, tto_showImages):
     """
     report view-synthesis result on heldout views
     """
@@ -96,6 +96,8 @@ def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size):
     rays = get_rays_shapenet_mipNerf(hwf, poses)
     
     view_psnrs = []
+    fig = plt.figure(figsize=(15, 6))
+    count = 0
     for i in range(imgs.shape[0]):
         img = imgs[i]
         ray = Rays(
@@ -118,18 +120,21 @@ def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size):
         val_psnr_fine = calc_psnr(fine_rgb, rgb_gt)
         view_psnrs.append(val_psnr_fine)
     
-    fig = plt.figure(figsize=(15, 6))   
-    plt.subplot(1, 3, 1)
-    plt.imshow(img.cpu())
-    plt.title('gt')
-    plt.subplot(1, 3, 2)
-    plt.imshow(coarse_rgb.squeeze(0).cpu())
-    plt.title('coarse_rgb')
-    plt.subplot(1, 3, 3)
-    plt.imshow(fine_rgb.squeeze(0).cpu())
-    plt.title('fine_rgb')
-    fig.suptitle(f'psnr:{val_psnr_fine:0.3f}',fontweight ="bold")
-    fig.tight_layout()
+        fine_rgb = torch.clip(fine_rgb.squeeze(0), min=0, max=1)
+        
+        if count < tto_showImages:
+            plt.subplot(2, 5, count+1)
+            plt.imshow(img.cpu())
+            plt.title('Target')
+            plt.subplot(2,5,count+6)
+            # plt.imshow(coarse_rgb.squeeze(0).cpu())
+            # plt.title('coarse_rgb')
+            # plt.subplot(1, 3, 3)
+            plt.imshow(fine_rgb.cpu())
+            plt.title(f'synth psnr:{val_psnr_fine:0.2f}')
+        count += 1
+        
+    # fig.suptitle(f'psnr:{val_psnr_fine:0.3f}',fontweight ="bold")
     plt.show()
     
     scene_psnr = torch.stack(view_psnrs).mean()
@@ -157,7 +162,7 @@ def val_meta(args, model, val_loader, device):
                     bound, args.num_samples, args.tto_batchsize, args.tto_steps)
         
         scene_psnr = report_result(val_model, test_imgs, test_poses, hwf, bound, 
-                                    args.num_samples, args.test_batchsize)
+                                    args.num_samples, args.test_batchsize, args.tto_showImages)
         val_psnrs.append(scene_psnr)
 
     val_psnr = torch.stack(val_psnrs).mean()

@@ -5,6 +5,9 @@
     "max_iters": 100001,
     "val_freq": 500,
     "max_val_size": 5,
+    "max_test_size": 30,
+    "train_val_steps": 100000,
+    "train_val_freq": 1000,
     "checkpoint_freq": 500,
     "checkpoint_path":"/content/drive/MyDrive/NeRF/meta_mipNerf_checkpoints/",
 
@@ -29,5 +32,6 @@
     "test_views": 25,
     "test_batchsize": 4096,
     "radius": 4.0,
+    "create_video": false,
     "savedir": "./videos"
 }
