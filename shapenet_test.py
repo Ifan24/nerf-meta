@@ -117,8 +117,8 @@ def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_pos
                 # plotlosses_model.update({'test':scene_psnr}, current_step=step)
                 # plotlosses_model.send()
             
-            # step           = <1000 -> <10000 -> <50000 -> <100000
-            # train_val_freq = 100   -> 500    -> 2500   -> 5000
+            # step           = <=1000 -> <=10000 -> <=50000 -> <=100000
+            # train_val_freq = 100    -> 500     -> 2500    -> 5000
             if step <= 1000:
                 train_val_freq = 100
             elif step > 1000 and step <= 10000:
@@ -155,7 +155,7 @@ def test():
         test_set = Subset(test_set, range(0, args.max_test_size))
     test_loader = DataLoader(test_set, batch_size=1, shuffle=False)
 
-    model = build_MipNerf()
+    model = build_MipNerf(args)
     model.to(device)
 
     if not args.standard_init:
@@ -193,7 +193,6 @@ def test():
         optim = torch.optim.SGD(model.parameters(), args.tto_lr)
 
         test_time_optimize(args, model, optim, tto_imgs, tto_poses, hwf, bound)
-        # scene_psnr = report_result(args, model, test_imgs, test_poses, hwf, bound)
         scene_psnr = report_result(model, test_imgs, test_poses, hwf, bound, 
                                     args.num_samples, args.test_batchsize, args.tto_showImages)
         

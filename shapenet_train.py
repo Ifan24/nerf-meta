@@ -193,8 +193,7 @@ def main():
         val_set = Subset(val_set, range(0, args.max_val_size))
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
 
-    # meta_model = build_nerf(args)
-    meta_model = build_MipNerf()
+    meta_model = build_MipNerf(args)
     meta_model.to(device)
     
     if args.resume_step != 0:
