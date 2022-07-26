@@ -18,7 +18,7 @@ def test_time_optimize(args, model, optim, imgs, poses, hwf, bound):
     """
     test-time-optimize the meta trained model on available views
     """
-    inner_loop(model, optim, imgs, poses, hwf, bound, args)
+    inner_loop(model, optim, imgs, poses, hwf, bound, args.num_samples, args.tto_batchsize, args.tto_steps, args.model)
 
 
 def train_val_scene_simple(args, model, optim, tto_imgs, tto_poses, test_imgs, test_poses, hwf, bound):
@@ -290,7 +290,8 @@ def test():
         optim = torch.optim.SGD(model.parameters(), args.tto_lr)
 
         test_time_optimize(args, model, optim, tto_imgs, tto_poses, hwf, bound)
-        scene_psnr = report_result(model, test_imgs, test_poses, hwf, bound, args)
+        scene_psnr = report_result(model, test_imgs, test_poses, hwf, bound, 
+                                    args.num_samples, args.test_batchsize, args.tto_showImages, args.model)
         
         if args.create_video:
             create_360_video(args, model, hwf, bound, device, idx+1, savedir)

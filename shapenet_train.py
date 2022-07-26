@@ -27,24 +27,24 @@ def calc_psnr(x: torch.Tensor, y: torch.Tensor):
     psnr = -10.0 * torch.log10(mse)
     return psnr
 
-def inner_loop(model, optim, imgs, poses, hwf, bound, args):
+def inner_loop(model, optim, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps, arch):
     """
     train the inner model for a specified number of iterations
     """
-    if args.model == 'mip':
+    if arch == 'mip':
         # mult factor for coarse MLP loss
         coarse_loss_mult = 0.2
         # imgs = [N, H, W, 3]
         
         rays = get_rays_shapenet_mipNerf(hwf, poses)
         # rays = [N, H, W, 3 or 1]
-        raybatch, val_mask = get_raybatch(rays, imgs, args.raybatch_size)
+        raybatch, val_mask = get_raybatch(rays, imgs, raybatch_size)
         # len(raybatch) = N*H*W/raybatch_size
         # raybatch.origins = [raybatch_size, 3]
         # randomly select N=inner_steps sample from raybatch
-        indices = torch.randint(len(raybatch), size=[args.inner_steps])
+        indices = torch.randint(len(raybatch), size=[inner_steps])
         
-        for step in range(args.inner_steps):
+        for step in range(inner_steps):
             idx = indices[step]
             rgbs = raybatch[idx].color
             rays_batch = raybatch[idx]
@@ -63,19 +63,19 @@ def inner_loop(model, optim, imgs, poses, hwf, bound, args):
             loss.backward()
             optim.step()
             
-    elif args.model == 'simple':
+    elif arch == 'simple':
         pixels = imgs.reshape(-1, 3)
 
         rays_o, rays_d = get_rays_shapenet(hwf, poses)
         rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
     
         num_rays = rays_d.shape[0]
-        for step in range(args.inner_steps):
-            indices = torch.randint(num_rays, size=[args.raybatch_size])
+        for step in range(inner_steps):
+            indices = torch.randint(num_rays, size=[raybatch_size])
             raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
             pixelbatch = pixels[indices] 
             t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
-                                        args.num_samples, perturb=True)
+                                        num_samples, perturb=True)
             
             optim.zero_grad()
             rgbs, sigmas = model(xyz)
@@ -104,11 +104,11 @@ def render_image(model, rays, rgbs, val_chunk_size):
     return coarse_rgb, fine_rgb, val_mask
         
     
-def report_result(model, imgs, poses, hwf, bound, args):
+def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size, tto_showImages, arch):
     """
     report view-synthesis result on heldout views
     """
-    if args.model == 'mip':
+    if arch == 'mip':
         coarse_loss_mult = 0.2
         rays = get_rays_shapenet_mipNerf(hwf, poses)
         
@@ -128,7 +128,7 @@ def report_result(model, imgs, poses, hwf, bound, args):
             )
             
             rgb_gt = img[..., :3]
-            coarse_rgb, fine_rgb, val_mask = render_image(model, ray, img, args.raybatch_size)
+            coarse_rgb, fine_rgb, val_mask = render_image(model, ray, img, raybatch_size)
         
             val_mse_coarse = (val_mask * (coarse_rgb - rgb_gt) ** 2).sum() / val_mask.sum()
             val_mse_fine = (val_mask * (fine_rgb - rgb_gt) ** 2).sum() / val_mask.sum()
@@ -139,7 +139,7 @@ def report_result(model, imgs, poses, hwf, bound, args):
         
             fine_rgb = torch.clip(fine_rgb.squeeze(0), min=0, max=1)
             
-            if count < args.tto_showImages:
+            if count < tto_showImages:
                 plt.subplot(2, 5, count+1)
                 plt.imshow(img.cpu())
                 plt.title('Target')
@@ -153,21 +153,21 @@ def report_result(model, imgs, poses, hwf, bound, args):
         scene_psnr = torch.stack(view_psnrs).mean()
         return scene_psnr
     
-    elif args.model == 'simple':
+    elif arch == 'simple':
         ray_origins, ray_directions = get_rays_shapenet(hwf, poses)
         view_psnrs = []
         for img, rays_o, rays_d in zip(imgs, ray_origins, ray_directions):
             rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
             t_vals, xyz = sample_points(rays_o, rays_d, bound[0], bound[1],
-                                        args.num_samples, perturb=False)
+                                        num_samples, perturb=False)
             
             synth = []
             num_rays = rays_d.shape[0]
             with torch.no_grad():
-                for i in range(0, num_rays, args.raybatch_size):
-                    rgbs_batch, sigmas_batch = model(xyz[i:i+args.raybatch_size])
+                for i in range(0, num_rays, raybatch_size):
+                    rgbs_batch, sigmas_batch = model(xyz[i:i+raybatch_size])
                     color_batch = volume_render(rgbs_batch, sigmas_batch, 
-                                                t_vals[i:i+args.raybatch_size],
+                                                t_vals[i:i+raybatch_size],
                                                 white_bkgd=True)
                     synth.append(color_batch)
                 synth = torch.cat(synth, dim=0).reshape_as(img)
@@ -197,9 +197,10 @@ def val_meta(args, model, val_loader, device):
         val_model.load_state_dict(meta_trained_state)
         val_optim = torch.optim.SGD(val_model.parameters(), args.tto_lr)
 
-        inner_loop(val_model, val_optim, tto_imgs, tto_poses, hwf, bound, args)
-        
-        scene_psnr = report_result(val_model, test_imgs, test_poses, hwf, bound, args)
+        inner_loop(val_model, val_optim, tto_imgs, tto_poses, hwf,
+                    bound, args.num_samples, args.tto_batchsize, args.tto_steps, args.model)
+        scene_psnr = report_result(val_model, test_imgs, test_poses, hwf, bound, 
+                                    args.num_samples, args.test_batchsize, args.tto_showImages, args.model)
         val_psnrs.append(scene_psnr)
 
     val_psnr = torch.stack(val_psnrs).mean()
@@ -268,8 +269,10 @@ def main():
             inner_model = copy.deepcopy(meta_model)
             inner_optim = torch.optim.SGD(inner_model.parameters(), args.inner_lr)
     
-            inner_loop(inner_model, inner_optim, imgs, poses, hwf, bound, args)
-            
+            inner_loop(inner_model, inner_optim, imgs, poses,
+                        hwf, bound, args.num_samples,
+                        args.train_batchsize, args.inner_steps, args.model)
+                        
             # Reptile
             with torch.no_grad():
                 for meta_param, inner_param in zip(meta_model.parameters(), inner_model.parameters()):
