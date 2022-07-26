@@ -18,12 +18,104 @@ def test_time_optimize(args, model, optim, imgs, poses, hwf, bound):
     """
     test-time-optimize the meta trained model on available views
     """
-    inner_loop(model, optim, imgs, poses, hwf, bound, args.num_samples, args.tto_batchsize, args.tto_steps)
+    inner_loop(model, optim, imgs, poses, hwf, bound, args)
 
+
+def train_val_scene_simple(args, model, optim, tto_imgs, tto_poses, test_imgs, test_poses, hwf, bound):
+    """
+    train and val the model on available views
+    """
+    train_val_freq = args.train_val_freq
+    pixels = tto_imgs.reshape(-1, 3)
+
+    tto_rays_o, tto_rays_d = get_rays_shapenet(hwf, tto_poses)
+    tto_rays_o, tto_rays_d = tto_rays_o.reshape(-1, 3), tto_rays_d.reshape(-1, 3)
+
+    test_ray_origins, test_ray_directions = get_rays_shapenet(hwf, test_poses)
+
+    num_samples = args.num_samples
+    tto_showImages = 5    
+
+    num_rays = tto_rays_d.shape[0]
+    val_psnrs = []
+    for step in tqdm(range(args.train_val_steps), desc = 'Train & Validate'):
+        indices = torch.randint(num_rays, size=[args.tto_batchsize])
+        raybatch_o, raybatch_d = tto_rays_o[indices], tto_rays_d[indices]
+        pixelbatch = pixels[indices] 
+        t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
+                                    num_samples, perturb=True)
+        
+        optim.zero_grad()
+        rgbs, sigmas = model(xyz)
+        colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
+        loss = F.mse_loss(colors, pixelbatch)
+        loss.backward()
+        optim.step()
+
+        if step % train_val_freq == 0 and step != 0:
+            with torch.no_grad():
+                view_psnrs = []
+                plt.figure(figsize=(15, 6))
+                count = 0
+                
+                for img, rays_o, rays_d in zip(test_imgs, test_ray_origins, test_ray_directions):
+                    rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
+                    t_vals, xyz = sample_points(rays_o, rays_d, bound[0], bound[1],
+                                                num_samples, perturb=False)
+                    
+                    synth = []
+                    test_num_rays = rays_d.shape[0]
+                    for i in range(0, test_num_rays, args.test_batchsize):
+                        rgbs_batch, sigmas_batch = model(xyz[i:i+args.test_batchsize])
+                        color_batch = volume_render(rgbs_batch, sigmas_batch, 
+                                                    t_vals[i:i+args.test_batchsize],
+                                                    white_bkgd=True)
+                        synth.append(color_batch)
+                    
+                    synth = torch.clip(torch.cat(synth, dim=0).reshape_as(img), min=0, max=1)
+                    error = F.mse_loss(img, synth)
+                    psnr = -10*torch.log10(error)
+                    view_psnrs.append(psnr)
+                    
+                    if count < tto_showImages:
+                        plt.subplot(2, 5, count+1)
+                        plt.imshow(img.cpu())
+                        plt.title('Target')
+                        plt.subplot(2,5,count+6)
+                        plt.imshow(synth.cpu())
+                        plt.title(f'{psnr:0.2f}')   
+                    count += 1
+
+                plt.show()
+              
+                plt.figure()
+                scene_psnr = torch.stack(view_psnrs).mean().item()
+                val_psnrs.append((step, scene_psnr))
+                print(f"step: {step}, val psnr: {scene_psnr:0.3f}")
+                plt.plot(*zip(*val_psnrs), label="val_psnr")
+                plt.title(f'ShapeNet Reconstruction from {args.tto_views} views')
+                plt.xlabel('Iterations')
+                plt.ylabel('PSNR')
+                plt.legend()
+                plt.show()
+
+        if step <= 1000:
+            train_val_freq = 100
+        elif step > 1000 and step <= 10000:
+            train_val_freq = 500
+        elif step > 10000 and step <= 50000:
+            train_val_freq = 2500
+        elif step > 50000 and step <= 100000:
+            train_val_freq = 5000
+    print(val_psnrs)
+    
 def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_poses, hwf, bound):
     """
     train and val the model on available views
     """
+    if args.model == 'simple':
+        return train_val_scene_simple(args, model, optim, tto_imgs, tto_poses, test_imgs, test_poses, hwf, bound)
+        
     coarse_loss_mult = 0.2
     rays = get_rays_shapenet_mipNerf(hwf, tto_poses)
     raybatch, val_mask = get_raybatch(rays, tto_imgs, args.tto_batchsize)
@@ -138,7 +230,8 @@ def test():
                         help='path to the meta-trained weight file')
     parser.add_argument('--one_scene', action='store_true', help="train and validate the model on the first scene of test dataset")
     parser.add_argument('--standard_init', action='store_true', help="train and validate the model without meta learning parameters")
-    
+    parser.add_argument('--model', type=str, default='mip', choices=['simple', 'mip', 'ngp'],
+                        help='inner model, (simple, mip, ngp)')
     args = parser.parse_args()
 
     with open(args.config) as config:
@@ -155,7 +248,11 @@ def test():
         test_set = Subset(test_set, range(0, args.max_test_size))
     test_loader = DataLoader(test_set, batch_size=1, shuffle=False)
 
-    model = build_MipNerf(args)
+    if args.model == 'mip':
+        model = build_MipNerf(args)
+    elif args.model == 'simple':
+        model = build_nerf(args)
+        
     model.to(device)
 
     if not args.standard_init:
@@ -193,8 +290,7 @@ def test():
         optim = torch.optim.SGD(model.parameters(), args.tto_lr)
 
         test_time_optimize(args, model, optim, tto_imgs, tto_poses, hwf, bound)
-        scene_psnr = report_result(model, test_imgs, test_poses, hwf, bound, 
-                                    args.num_samples, args.test_batchsize, args.tto_showImages)
+        scene_psnr = report_result(model, test_imgs, test_poses, hwf, bound, args)
         
         if args.create_video:
             create_360_video(args, model, hwf, bound, device, idx+1, savedir)
