@@ -3,13 +3,13 @@
     "splits_path": "chair_splits.json",
     
     "max_iters": 100001,
-    "val_freq": 500,
     "max_val_size": 0,
     "max_test_size": 0,
     "max_train_size": 0,
     "train_val_steps": 100001,
     "train_val_freq": 1000,
-    "checkpoint_freq": 500,
+    "val_freq": 1000,
+    "checkpoint_freq": 1000,
     "checkpoint_path":"/content/drive/MyDrive/NeRF/baseline_meta_checkpoints/",
 
     "max_freq": 8,

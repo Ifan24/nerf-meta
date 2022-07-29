@@ -9,6 +9,7 @@ from models.nerf import build_nerf
 from models.rendering import get_rays_shapenet, sample_points, volume_render
 from tqdm.notebook import tqdm as tqdm
 import matplotlib.pyplot as plt
+from torchmeta.utils.gradient_based import gradient_update_parameters as GUP
 
 
 def inner_loop(model, optim, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps):
@@ -41,7 +42,7 @@ def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size, tt
     """
     ray_origins, ray_directions = get_rays_shapenet(hwf, poses)
     view_psnrs = []
-    fig = plt.figure(figsize=(15, 6))
+    plt.figure(figsize=(15, 6))
     count = 0
     for img, rays_o, rays_d in zip(imgs, ray_origins, ray_directions):
         rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
@@ -68,7 +69,7 @@ def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size, tt
                 plt.title('Target')
                 plt.subplot(2,5,count+6)
                 plt.imshow(synth.cpu())
-                plt.title(f'synth psnr:{scene_psnr:0.2f}')
+                plt.title(f'synth psnr:{psnr:0.2f}')
             count += 1
             
     plt.show()
@@ -110,8 +111,12 @@ def main():
                         help='config file for the shape class (cars, chairs or lamps)')
     parser.add_argument('--resume_step', type=int, default=0,
                         help='resume training from step')
+    parser.add_argument('--meta', type=str, default='Reptile', choices=['MAML', 'Reptile'],
+                        help='meta algorithm, (MAML, Reptile)')
     args = parser.parse_args()
-
+    
+    use_reptile = args.meta == 'Reptile'
+    
     with open(args.config) as config:
         info = json.load(config)
         for key, value in info.items():
@@ -156,19 +161,69 @@ def main():
             imgs, poses, hwf, bound = imgs.squeeze(), poses.squeeze(), hwf.squeeze(), bound.squeeze()
     
             meta_optim.zero_grad()
-    
-            inner_model = copy.deepcopy(meta_model)
-            inner_optim = torch.optim.SGD(inner_model.parameters(), args.inner_lr)
-    
-            inner_loop(inner_model, inner_optim, imgs, poses,
-                        hwf, bound, args.num_samples,
-                        args.train_batchsize, args.inner_steps)
-                        
-            # Reptile
-            with torch.no_grad():
-                for meta_param, inner_param in zip(meta_model.parameters(), inner_model.parameters()):
-                    meta_param.grad = meta_param - inner_param
             
+            if use_reptile:
+                inner_model = copy.deepcopy(meta_model)
+                inner_optim = torch.optim.SGD(inner_model.parameters(), args.inner_lr)
+        
+                inner_loop(inner_model, inner_optim, imgs, poses,
+                            hwf, bound, args.num_samples,
+                            args.train_batchsize, args.inner_steps)
+                            
+                # Reptile
+                with torch.no_grad():
+                    for meta_param, inner_param in zip(meta_model.parameters(), inner_model.parameters()):
+                        meta_param.grad = meta_param - inner_param
+            # python shapenet_train.py --config configs/shapenet/chairs.json --meta MAML
+            # MAML
+            # https://github.com/tristandeleu/pytorch-meta/blob/master/examples/maml/train.py
+            else:
+                def MAML_inner_loop(model, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps, alpha=5e-2, init_params=None):
+                    params = init_params
+                    # 128x128
+                    pixels = imgs.reshape(-1, 3)
+    
+                    rays_o, rays_d = get_rays_shapenet(hwf, poses)
+                    rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
+                
+                    num_rays = rays_d.shape[0]
+                    for step in range(inner_steps+1):
+                        indices = torch.randint(num_rays, size=[raybatch_size])
+                        raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
+                        pixelbatch = pixels[indices] 
+                        t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
+                                                    num_samples, perturb=True)
+                        
+                        rgbs, sigmas = model(xyz, params=params)
+                        colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
+                        loss = F.mse_loss(colors, pixelbatch)
+                        
+                        # evaluate 
+                        if step == inner_steps:
+                            return loss
+                            
+                        model.zero_grad()
+                        params = GUP(model, loss, params=params, step_size=alpha)
+                        
+                            
+                outer_loss = torch.tensor(0.).to(device)
+                batch_size = 3
+                for i in range(batch_size):
+                    task_poses = poses[i]
+                    # add batch dimension
+                    task_poses = task_poses[None, :]
+                    
+                    # update parameter with the inner loop loss
+                    loss = MAML_inner_loop(meta_model, imgs[i], task_poses, hwf, bound, args.num_samples,
+                            args.train_batchsize, args.inner_steps, args.inner_lr)
+                    
+                    # evaluate on 3 views 
+                    outer_loss += loss
+                    
+                meta_optim.zero_grad()
+                outer_loss.div_(batch_size)
+                outer_loss.backward()
+        
             meta_optim.step()
         
             if step % args.val_freq == 0 and step != args.resume_step:
