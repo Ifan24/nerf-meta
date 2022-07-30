@@ -10,6 +10,7 @@ from models.rendering import get_rays_shapenet, sample_points, volume_render
 from tqdm.notebook import tqdm as tqdm
 import matplotlib.pyplot as plt
 from torchmeta.utils.gradient_based import gradient_update_parameters as GUP
+import matplotlib.pyplot as plt
 
 
 def inner_loop(model, optim, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps):
@@ -155,7 +156,7 @@ def main():
     pbar = tqdm(total=args.max_iters, desc = 'Training')
     pbar.update(args.resume_step)
     val_psnrs = []
-    
+    train_psnrs = []
     while step < args.max_iters:
         for imgs, poses, hwf, bound in train_loader:
             # imgs = [1, train_views(25), H(128), W(128), C(3)]
@@ -183,6 +184,8 @@ def main():
                 def MAML_inner_loop(model, pixels, rays_o, rays_d, num_rays, bound, num_samples, raybatch_size, inner_steps, alpha=5e-2):
                     params = None
                 
+                    # Multi-Step Loss Optimization
+                    total_loss = torch.tensor(0.).to(device)
                     for step in range(inner_steps+1):
                         indices = torch.randint(num_rays, size=[raybatch_size])
                         raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
@@ -194,10 +197,14 @@ def main():
                         colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
                         loss = F.mse_loss(colors, pixelbatch)
                         
+                        total_loss += loss * step/inner_steps
+                        
+                        if step == inner_steps:
+                            return total_loss
+                        
                         model.zero_grad()
                         params = GUP(model, loss, params=params, step_size=alpha, first_order=True)
                         
-                    return loss
                             
                 outer_loss = torch.tensor(0.).to(device)
                 batch_size = args.MAML_batch
@@ -207,6 +214,9 @@ def main():
                 rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
                 num_rays = rays_d.shape[0]
                 
+                # In MAML, the losses of a batch tasks were used to update meta parameter 
+                # but the batch of tasks in NeRF does not makes too much sense
+                # should it be a batch of scenes? or a batch of pixels in a single scene
                 for i in range(batch_size):
                     # update parameter with the inner loop loss
                     loss = MAML_inner_loop(meta_model, pixels, rays_o, rays_d, num_rays, bound, args.num_samples,
@@ -215,15 +225,26 @@ def main():
                     outer_loss += loss
                     
                 meta_optim.zero_grad()
-                outer_loss.div_(batch_size)
+                outer_loss.div_(batch_size*args.inner_steps)
                 outer_loss.backward()
         
             meta_optim.step()
         
             if step % args.val_freq == 0 and step != args.resume_step:
+                train_psnrs.append((step, -10*torch.log10(outer_loss).detach().cpu()))
+                
                 val_psnr = val_meta(args, meta_model, val_loader, device)
                 print(f"step: {step}, val psnr: {val_psnr:0.3f}")
-                val_psnrs.append((step, val_psnr))
+                val_psnrs.append((step, val_psnr.cpu()))
+                
+                plt.subplots()
+                plt.plot(*zip(*val_psnrs), label="Meta learning validation PSNR")
+                plt.plot(*zip(*train_psnrs), label="Meta learning Training PSNR")
+                plt.title('ShapeNet Meta learning Training PSNR')
+                plt.xlabel('Iterations')
+                plt.ylabel('PSNR')
+                plt.legend()
+                plt.show()
           
             if step % args.checkpoint_freq == 0 and step != args.resume_step:
                 path = f"{args.checkpoint_path}/step{step}.pth"
