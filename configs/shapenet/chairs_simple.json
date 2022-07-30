@@ -8,9 +8,9 @@
     "max_train_size": 0,
     "train_val_steps": 100001,
     "train_val_freq": 1000,
-    "val_freq": 1000,
-    "checkpoint_freq": 1000,
-    "checkpoint_path":"/content/drive/MyDrive/NeRF/baseline_meta_checkpoints/",
+    "val_freq": 500,
+    "checkpoint_freq": 500,
+    "checkpoint_path":"/content/drive/MyDrive/NeRF/baseline_meta_checkpoints/MAML",
 
     "max_freq": 8,
     "num_freqs": 20,

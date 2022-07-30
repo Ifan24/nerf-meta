@@ -116,6 +116,8 @@ def test():
                         help='path to the meta-trained weight file')
     parser.add_argument('--one_scene', action='store_true', help="train and validate the model on the first scene of test dataset")
     parser.add_argument('--standard_init', action='store_true', help="train and validate the model without meta learning parameters")
+    parser.add_argument('--meta', type=str, default='Reptile', choices=['MAML', 'Reptile'],
+                        help='meta algorithm, (MAML, Reptile)')
     args = parser.parse_args()
 
     with open(args.config) as config:

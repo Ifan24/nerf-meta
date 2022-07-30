@@ -58,7 +58,7 @@ def report_result(model, imgs, poses, hwf, bound, num_samples, raybatch_size, tt
                                             t_vals[i:i+raybatch_size],
                                             white_bkgd=True)
                 synth.append(color_batch)
-            synth = torch.cat(synth, dim=0).reshape_as(img)
+            synth = torch.clip(torch.cat(synth, dim=0).reshape_as(img), min=0, max=1)
             error = F.mse_loss(img, synth)
             psnr = -10*torch.log10(error)
             view_psnrs.append(psnr)
@@ -113,6 +113,8 @@ def main():
                         help='resume training from step')
     parser.add_argument('--meta', type=str, default='Reptile', choices=['MAML', 'Reptile'],
                         help='meta algorithm, (MAML, Reptile)')
+    parser.add_argument('--MAML_batch', type=int, default=3,
+                        help='number of batch of task for MAML')
     args = parser.parse_args()
     
     use_reptile = args.meta == 'Reptile'
@@ -178,15 +180,9 @@ def main():
             # MAML
             # https://github.com/tristandeleu/pytorch-meta/blob/master/examples/maml/train.py
             else:
-                def MAML_inner_loop(model, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps, alpha=5e-2, init_params=None):
-                    params = init_params
-                    # 128x128
-                    pixels = imgs.reshape(-1, 3)
-    
-                    rays_o, rays_d = get_rays_shapenet(hwf, poses)
-                    rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
+                def MAML_inner_loop(model, pixels, rays_o, rays_d, num_rays, bound, num_samples, raybatch_size, inner_steps, alpha=5e-2):
+                    params = None
                 
-                    num_rays = rays_d.shape[0]
                     for step in range(inner_steps+1):
                         indices = torch.randint(num_rays, size=[raybatch_size])
                         raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
@@ -198,26 +194,24 @@ def main():
                         colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
                         loss = F.mse_loss(colors, pixelbatch)
                         
-                        # evaluate 
-                        if step == inner_steps:
-                            return loss
-                            
                         model.zero_grad()
-                        params = GUP(model, loss, params=params, step_size=alpha)
+                        params = GUP(model, loss, params=params, step_size=alpha, first_order=True)
                         
+                    return loss
                             
                 outer_loss = torch.tensor(0.).to(device)
-                batch_size = 3
+                batch_size = args.MAML_batch
+                pixels = imgs.reshape(-1, 3)
+                # 25x128x128
+                rays_o, rays_d = get_rays_shapenet(hwf, poses)
+                rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
+                num_rays = rays_d.shape[0]
+                
                 for i in range(batch_size):
-                    task_poses = poses[i]
-                    # add batch dimension
-                    task_poses = task_poses[None, :]
-                    
                     # update parameter with the inner loop loss
-                    loss = MAML_inner_loop(meta_model, imgs[i], task_poses, hwf, bound, args.num_samples,
+                    loss = MAML_inner_loop(meta_model, pixels, rays_o, rays_d, num_rays, bound, args.num_samples,
                             args.train_batchsize, args.inner_steps, args.inner_lr)
                     
-                    # evaluate on 3 views 
                     outer_loss += loss
                     
                 meta_optim.zero_grad()
