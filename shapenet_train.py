@@ -7,10 +7,16 @@ from torch.utils.data import DataLoader, Subset
 from datasets.shapenet import build_shapenet
 from models.nerf import build_nerf
 from models.rendering import get_rays_shapenet, sample_points, volume_render
-from tqdm.notebook import tqdm as tqdm
+try:
+  import google.colab
+  from tqdm.notebook import tqdm as tqdm
+except:
+  from tqdm import tqdm as tqdm
+  
 import matplotlib.pyplot as plt
 from torchmeta.utils.gradient_based import gradient_update_parameters as GUP
 import matplotlib.pyplot as plt
+from collections import OrderedDict
 
 
 def inner_loop(model, optim, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps):
@@ -116,6 +122,11 @@ def main():
                         help='meta algorithm, (MAML, Reptile)')
     parser.add_argument('--MAML_batch', type=int, default=3,
                         help='number of batch of task for MAML')
+    # Meta-SGD
+    parser.add_argument('--learn_step_size', action='store_true',
+                        help='the step size is a learnable (meta-trained) additional argument')
+    parser.add_argument('--per_param_step_size', action='store_true',
+                        help='the step size parameter is different for each parameter of the model. Has no impact unless `learn_step_size=True')
     args = parser.parse_args()
     
     use_reptile = args.meta == 'Reptile'
@@ -152,6 +163,29 @@ def main():
 
     meta_optim = torch.optim.Adam(meta_model.parameters(), lr=args.meta_lr)
     
+    # learn_step_size & per_param_step_size
+    step_size = args.inner_lr
+    if args.per_param_step_size:
+        step_size = OrderedDict((name, torch.tensor(step_size,
+            dtype=param.dtype, device=device,
+            requires_grad=args.learn_step_size)) for (name, param)
+            in meta_model.meta_named_parameters())
+    else:
+        step_size = torch.tensor(step_size, dtype=torch.float32,
+            device=device, requires_grad=args.learn_step_size)
+            
+    if args.learn_step_size:
+        meta_optim.add_param_group({'params': step_size.values()
+            if args.per_param_step_size else [step_size]})
+        
+        # outer loop lr
+        # if scheduler is not None:
+        #     for group in meta_optim.param_groups:
+        #         group.setdefault('initial_lr', group['lr'])
+        #     scheduler.base_lrs([group['initial_lr']
+        #         for group in meta_optim.param_groups])
+    
+    
     step = args.resume_step
     pbar = tqdm(total=args.max_iters, desc = 'Training')
     pbar.update(args.resume_step)
@@ -177,15 +211,13 @@ def main():
                 with torch.no_grad():
                     for meta_param, inner_param in zip(meta_model.parameters(), inner_model.parameters()):
                         meta_param.grad = meta_param - inner_param
-            # python shapenet_train.py --config configs/shapenet/chairs.json --meta MAML
+            # python shapenet_train.py --config configs/shapenet/chairs.json --meta MAML --learn_step_size --per_param_step_size 
             # MAML
             # https://github.com/tristandeleu/pytorch-meta/blob/master/examples/maml/train.py
             else:
                 def MAML_inner_loop(model, pixels, rays_o, rays_d, num_rays, bound, num_samples, raybatch_size, inner_steps, alpha=5e-2):
                     params = None
                 
-                    # Multi-Step Loss Optimization
-                    total_loss = torch.tensor(0.).to(device)
                     for step in range(inner_steps+1):
                         indices = torch.randint(num_rays, size=[raybatch_size])
                         raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
@@ -197,13 +229,13 @@ def main():
                         colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
                         loss = F.mse_loss(colors, pixelbatch)
                         
-                        total_loss += loss * step/inner_steps
-                        
                         if step == inner_steps:
-                            return total_loss
+                            # use the param from previous inner_steps to get a outer loss
+                            return loss
                         
                         model.zero_grad()
-                        params = GUP(model, loss, params=params, step_size=alpha, first_order=True)
+                        print(alpha)
+                        params = GUP(model, loss, params=params, step_size=alpha)
                         
                             
                 outer_loss = torch.tensor(0.).to(device)
@@ -220,12 +252,12 @@ def main():
                 for i in range(batch_size):
                     # update parameter with the inner loop loss
                     loss = MAML_inner_loop(meta_model, pixels, rays_o, rays_d, num_rays, bound, args.num_samples,
-                            args.train_batchsize, args.inner_steps, args.inner_lr)
+                            args.train_batchsize, args.inner_steps, step_size)
                     
                     outer_loss += loss
                     
                 meta_optim.zero_grad()
-                outer_loss.div_(batch_size*args.inner_steps)
+                outer_loss.div_(batch_size)
                 outer_loss.backward()
         
             meta_optim.step()

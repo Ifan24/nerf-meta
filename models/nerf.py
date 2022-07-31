@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchmeta.modules import MetaModule, MetaSequential
+from torchmeta.modules import MetaModule, MetaSequential, MetaLinear
 
 
 class PositionalEncoding(nn.Module):
@@ -92,6 +92,7 @@ def build_nerf(args):
 class MetaSimpleNeRF(MetaModule):
     """
     A simple NeRF MLP without view dependence and skip connections.
+    Implemented with MetaModule
     """
     def __init__(self, in_features, max_freq, num_freqs,
                  hidden_features, hidden_layers, out_features):
@@ -107,14 +108,14 @@ class MetaSimpleNeRF(MetaModule):
 
         self.net = []
         self.net.append(PositionalEncoding(max_freq, num_freqs))
-        self.net.append(nn.Linear(2*num_freqs*in_features, hidden_features))
+        self.net.append(MetaLinear(2*num_freqs*in_features, hidden_features))
         self.net.append(nn.ReLU())
     
         for i in range(hidden_layers-1):
-            self.net.append(nn.Linear(hidden_features, hidden_features))
+            self.net.append(MetaLinear(hidden_features, hidden_features))
             self.net.append(nn.ReLU())
 
-        self.net.append(nn.Linear(hidden_features, out_features))
+        self.net.append(MetaLinear(hidden_features, out_features))
         self.net = MetaSequential(*self.net)
 
     def forward(self, x, params=None):
