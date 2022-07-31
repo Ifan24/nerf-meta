@@ -14,6 +14,7 @@
     
     "learn_step_size": true,
     "per_param_step_size": true,
+    "use_scheduler": true,
 
     "max_freq": 8,
     "num_freqs": 20,

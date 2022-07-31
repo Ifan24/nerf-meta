@@ -125,8 +125,15 @@ def main():
     # Meta-SGD
     parser.add_argument('--learn_step_size', action='store_true',
                         help='the step size is a learnable (meta-trained) additional argument')
+    # Meta-SGD
     parser.add_argument('--per_param_step_size', action='store_true',
                         help='the step size parameter is different for each parameter of the model. Has no impact unless `learn_step_size=True')
+    parser.add_argument('--reptile_torchmeta', action='store_true',
+                        help='use torchmeta framework for reptile inner loop')
+    # MAML++
+    parser.add_argument('--use_scheduler', action='store_true',
+                        help='use scheduler to adjust outer loop lr')   
+                        
     args = parser.parse_args()
     
     use_reptile = args.meta == 'Reptile'
@@ -165,6 +172,10 @@ def main():
     
     # learn_step_size & per_param_step_size
     step_size = args.inner_lr
+    scheduler = None
+    if args.use_scheduler:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=meta_optim, T_max=args.max_iters, eta_min=args.meta_lr)
+                                                              
     if args.per_param_step_size:
         step_size = OrderedDict((name, torch.tensor(step_size,
             dtype=param.dtype, device=device,
@@ -177,13 +188,14 @@ def main():
     if args.learn_step_size:
         meta_optim.add_param_group({'params': step_size.values()
             if args.per_param_step_size else [step_size]})
-        
+    
         # outer loop lr
         # if scheduler is not None:
         #     for group in meta_optim.param_groups:
         #         group.setdefault('initial_lr', group['lr'])
-        #     scheduler.base_lrs([group['initial_lr']
-        #         for group in meta_optim.param_groups])
+        #     # scheduler.base_lrs([group['initial_lr'] for group in meta_optim.param_groups])
+        #     print([group['initial_lr'] for group in meta_optim.param_groups])
+            
     
     
     step = args.resume_step
@@ -192,7 +204,7 @@ def main():
     val_psnrs = []
     train_psnrs = []
     while step < args.max_iters:
-        for imgs, poses, hwf, bound in train_loader:
+        for imgs, poses, hwf, bound in train_loader:                    
             # imgs = [1, train_views(25), H(128), W(128), C(3)]
             imgs, poses, hwf, bound = imgs.to(device), poses.to(device), hwf.to(device), bound.to(device)
             imgs, poses, hwf, bound = imgs.squeeze(), poses.squeeze(), hwf.squeeze(), bound.squeeze()
@@ -200,22 +212,60 @@ def main():
             meta_optim.zero_grad()
             
             if use_reptile:
-                inner_model = copy.deepcopy(meta_model)
-                inner_optim = torch.optim.SGD(inner_model.parameters(), args.inner_lr)
-        
-                inner_loop(inner_model, inner_optim, imgs, poses,
-                            hwf, bound, args.num_samples,
-                            args.train_batchsize, args.inner_steps)
+                if args.reptile_torchmeta:
+                    def torchmeta_inner_loop(model, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps, alpha, pbar):
+                        params = None
+                        
+                        pixels = imgs.reshape(-1, 3)
+                        rays_o, rays_d = get_rays_shapenet(hwf, poses)
+                        rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
+                        num_rays = rays_d.shape[0]
+                        
+                        for step in range(inner_steps):
+                            indices = torch.randint(num_rays, size=[raybatch_size])
+                            raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
+                            pixelbatch = pixels[indices] 
+                            t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
+                                                        num_samples, perturb=True)
                             
-                # Reptile
-                with torch.no_grad():
-                    for meta_param, inner_param in zip(meta_model.parameters(), inner_model.parameters()):
-                        meta_param.grad = meta_param - inner_param
+                            rgbs, sigmas = model(xyz, params=params)
+                            colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
+                            loss = F.mse_loss(colors, pixelbatch)
+                            model.zero_grad()
+                            params = GUP(model, loss, params=params, step_size=alpha)
+                            
+                        if isinstance(alpha, OrderedDict):
+                            pbar.set_postfix({'inner_lr': alpha['net.1.weight'].item(), 
+                            "outer_lr" : scheduler.get_last_lr()[0], 'Train loss': loss.item()})
+                        
+                        return params
+                    
+                    # updated params 
+                    new_params = torchmeta_inner_loop(meta_model, imgs, poses,
+                                hwf, bound, args.num_samples,
+                                args.train_batchsize, args.inner_steps, step_size, pbar)
+                    
+                    # Reptile
+                    with torch.no_grad():
+                        for meta_param, inner_param in zip(meta_model.parameters(), new_params.items()):
+                            meta_param.grad = meta_param - inner_param[1]
+                else:
+                    inner_model = copy.deepcopy(meta_model)
+                    inner_optim = torch.optim.SGD(inner_model.parameters(), args.inner_lr)
+            
+                    inner_loop(inner_model, inner_optim, imgs, poses,
+                                hwf, bound, args.num_samples,
+                                args.train_batchsize, args.inner_steps)
+                                
+                    # Reptile
+                    with torch.no_grad():
+                        for meta_param, inner_param in zip(meta_model.parameters(), inner_model.parameters()):
+                            meta_param.grad = meta_param - inner_param
             # python shapenet_train.py --config configs/shapenet/chairs.json --meta MAML --learn_step_size --per_param_step_size 
             # MAML
             # https://github.com/tristandeleu/pytorch-meta/blob/master/examples/maml/train.py
             else:
-                def MAML_inner_loop(model, pixels, rays_o, rays_d, num_rays, bound, num_samples, raybatch_size, inner_steps, alpha=5e-2):
+                def MAML_inner_loop(model, pixels, rays_o, rays_d, num_rays, bound, num_samples, raybatch_size, inner_steps, alpha, pbar):
                     params = None
                 
                     for step in range(inner_steps+1):
@@ -232,9 +282,11 @@ def main():
                         if step == inner_steps:
                             # use the param from previous inner_steps to get a outer loss
                             return loss
-                        
+                        if isinstance(alpha, OrderedDict):
+                            pbar.set_postfix({'inner_lr': alpha['net.1.weight'].item(), 
+                            "outer_lr" : scheduler.get_last_lr()[0], 'Train loss': loss.item()})
+
                         model.zero_grad()
-                        print(alpha)
                         params = GUP(model, loss, params=params, step_size=alpha)
                         
                             
@@ -252,7 +304,7 @@ def main():
                 for i in range(batch_size):
                     # update parameter with the inner loop loss
                     loss = MAML_inner_loop(meta_model, pixels, rays_o, rays_d, num_rays, bound, args.num_samples,
-                            args.train_batchsize, args.inner_steps, step_size)
+                            args.train_batchsize, args.inner_steps, step_size, pbar)
                     
                     outer_loss += loss
                     
@@ -286,6 +338,10 @@ def main():
                     'meta_optim_state_dict': meta_optim.state_dict(),
                     }, path)
             
+            if scheduler is not None:
+                scheduler.step()
+                # pbar.set_postfix({"outer_lr" : scheduler.get_last_lr()[0]})
+                
             step += 1
             pbar.update(1)
             
