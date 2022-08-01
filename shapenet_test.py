@@ -37,6 +37,7 @@ def train_val_scene(args, model, optim, tto_imgs, tto_poses, test_imgs, test_pos
     num_rays = tto_rays_d.shape[0]
     val_psnrs = []
     for step in tqdm(range(args.train_val_steps), desc = 'Train & Validate'):
+        # Get a batch of indices in range of [0, num_rays]
         indices = torch.randint(num_rays, size=[args.tto_batchsize])
         raybatch_o, raybatch_d = tto_rays_o[indices], tto_rays_d[indices]
         pixelbatch = pixels[indices] 
