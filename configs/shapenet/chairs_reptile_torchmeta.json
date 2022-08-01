@@ -12,9 +12,8 @@
     "checkpoint_freq": 1000,
     "checkpoint_path":"/content/drive/MyDrive/NeRF/baseline_meta_checkpoints/MAML_scheduler",
     
-    "meta": "MAML",
-    "MAML_batch": 3,
-    "reptile_torchmeta": false,
+    "MAML_batch": 4,
+    "reptile_torchmeta": true,
     "learn_step_size": true,
     "per_param_step_size": true,
     "use_scheduler": true,
@@ -26,10 +25,10 @@
 
     "train_views": 25,
     "meta_lr": 5e-4,
-    "train_batchsize": 256,
+    "train_batchsize": 128,
     "num_samples": 128,
     "inner_lr": 0.1,
-    "inner_steps": 2,
+    "inner_steps": 16,
 
     "tto_views": 1,
     "tto_lr": 0.5,

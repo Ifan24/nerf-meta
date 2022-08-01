@@ -136,17 +136,23 @@ def main():
                         
     args = parser.parse_args()
     
-    use_reptile = args.meta == 'Reptile'
     
     with open(args.config) as config:
         info = json.load(config)
         for key, value in info.items():
             args.__dict__[key] = value
-
+            
+    print(args)
+    use_reptile = args.meta == 'Reptile'
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load train & val dataset
-    train_set = build_shapenet(image_set="train", dataset_root=args.dataset_root,
+    if args.meta == 'MAML':
+        # each batch we will use one more view to get the loss 
+        train_set = build_shapenet(image_set="train", dataset_root=args.dataset_root,
+                                splits_path=args.splits_path, num_views=args.train_views+args.MAML_batch)
+    else: 
+        train_set = build_shapenet(image_set="train", dataset_root=args.dataset_root,
                                 splits_path=args.splits_path, num_views=args.train_views)
     if args.max_train_size != 0:
         train_set = Subset(train_set, range(0, args.max_train_size))
@@ -174,7 +180,7 @@ def main():
     step_size = args.inner_lr
     scheduler = None
     if args.use_scheduler:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=meta_optim, T_max=args.max_iters, eta_min=args.meta_lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=meta_optim, T_max=args.max_iters/100, eta_min=args.meta_lr/100)
                                                               
     if args.per_param_step_size:
         step_size = OrderedDict((name, torch.tensor(step_size,
@@ -213,41 +219,36 @@ def main():
             
             if use_reptile:
                 if args.reptile_torchmeta:
-                    def torchmeta_inner_loop(model, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps, alpha, pbar):
-                        params = None
-                        
-                        pixels = imgs.reshape(-1, 3)
-                        rays_o, rays_d = get_rays_shapenet(hwf, poses)
-                        rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
-                        num_rays = rays_d.shape[0]
-                        
-                        for step in range(inner_steps):
-                            indices = torch.randint(num_rays, size=[raybatch_size])
-                            raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
-                            pixelbatch = pixels[indices] 
-                            t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
-                                                        num_samples, perturb=True)
-                            
-                            rgbs, sigmas = model(xyz, params=params)
-                            colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
-                            loss = F.mse_loss(colors, pixelbatch)
-                            model.zero_grad()
-                            params = GUP(model, loss, params=params, step_size=alpha)
-                            
-                        if isinstance(alpha, OrderedDict):
-                            pbar.set_postfix({'inner_lr': alpha['net.1.weight'].item(), 
-                            "outer_lr" : scheduler.get_last_lr()[0], 'Train loss': loss.item()})
-                        
-                        return params
+                    # OOM if inner step > 16
+                    params = None
                     
-                    # updated params 
-                    new_params = torchmeta_inner_loop(meta_model, imgs, poses,
-                                hwf, bound, args.num_samples,
-                                args.train_batchsize, args.inner_steps, step_size, pbar)
+                    pixels = imgs.reshape(-1, 3)
+                    rays_o, rays_d = get_rays_shapenet(hwf, poses)
+                    rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
+                    num_rays = rays_d.shape[0]
                     
+                    for step in range(args.inner_steps):
+                        indices = torch.randint(num_rays, size=[args.train_batchsize])
+                        raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
+                        pixelbatch = pixels[indices] 
+                        t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
+                                                    args.num_samples, perturb=True)
+                        
+                        rgbs, sigmas = meta_model(xyz, params=params)
+                        colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
+                        loss = F.mse_loss(colors, pixelbatch)
+                        meta_model.zero_grad()
+                        params = GUP(meta_model, loss, params=params, step_size=step_size)
+                        
+                    if args.per_param_step_size:
+                        pbar.set_postfix({'inner_lr': step_size['net.1.weight'].item(), 
+                        "outer_lr" : scheduler.get_last_lr()[0], 'Train loss': loss.item()})
+                    else:
+                        pbar.set_postfix({'inner_lr': step_size.item(), 
+                        "outer_lr" : scheduler.get_last_lr()[0], 'Train loss': loss.item()})
                     # Reptile
                     with torch.no_grad():
-                        for meta_param, inner_param in zip(meta_model.parameters(), new_params.items()):
+                        for meta_param, inner_param in zip(meta_model.meta_parameters(), params.items()):
                             meta_param.grad = meta_param - inner_param[1]
                 else:
                     inner_model = copy.deepcopy(meta_model)
@@ -265,10 +266,11 @@ def main():
             # MAML
             # https://github.com/tristandeleu/pytorch-meta/blob/master/examples/maml/train.py
             else:
-                def MAML_inner_loop(model, pixels, rays_o, rays_d, num_rays, bound, num_samples, raybatch_size, inner_steps, alpha, pbar):
+                def MAML_inner_loop(model, pixels, rays_o, rays_d, num_rays, bound, num_samples, 
+                    raybatch_size, inner_steps, alpha, val_pixels, val_rays_o, val_rays_d, val_num_rays):
                     params = None
                 
-                    for step in range(inner_steps+1):
+                    for step in range(inner_steps):
                         indices = torch.randint(num_rays, size=[raybatch_size])
                         raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
                         pixelbatch = pixels[indices] 
@@ -278,25 +280,47 @@ def main():
                         rgbs, sigmas = model(xyz, params=params)
                         colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
                         loss = F.mse_loss(colors, pixelbatch)
-                        
-                        if step == inner_steps:
-                            # use the param from previous inner_steps to get a outer loss
-                            return loss
-                        if isinstance(alpha, OrderedDict):
-                            pbar.set_postfix({'inner_lr': alpha['net.1.weight'].item(), 
-                            "outer_lr" : scheduler.get_last_lr()[0], 'Train loss': loss.item()})
 
                         model.zero_grad()
                         params = GUP(model, loss, params=params, step_size=alpha)
                         
+                    # use the param from previous inner_steps on val views to get a outer loss
+                    
+                    indices = torch.randint(val_num_rays, size=[raybatch_size])
+                    raybatch_o, raybatch_d = val_rays_o[indices], val_rays_d[indices]
+                    pixelbatch = val_pixels[indices] 
+                    t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
+                                                num_samples, perturb=True)
+                    
+                    rgbs, sigmas = model(xyz, params=params)
+                    colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
+                    loss = F.mse_loss(colors, pixelbatch)
+                        
+                    if args.per_param_step_size:
+                        pbar.set_postfix({'inner_lr': step_size['net.1.weight'].item(), 
+                        "outer_lr" : scheduler.get_last_lr()[0], 'Train loss': loss.item()})
+                    else:
+                        pbar.set_postfix({'inner_lr': step_size.item(), 
+                        "outer_lr" : scheduler.get_last_lr()[0], 'Train loss': loss.item()})
+                        
+                    return loss
+                        
                             
                 outer_loss = torch.tensor(0.).to(device)
                 batch_size = args.MAML_batch
+                val_imgs, val_poses = imgs[args.train_views:], poses[args.train_views:]
+                imgs, poses = imgs[:args.train_views], poses[:args.train_views] 
+                
                 pixels = imgs.reshape(-1, 3)
                 # 25x128x128
                 rays_o, rays_d = get_rays_shapenet(hwf, poses)
                 rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
                 num_rays = rays_d.shape[0]
+                
+                val_pixels = val_imgs.reshape(-1, 3)
+                val_rays_o, val_rays_d = get_rays_shapenet(hwf, val_poses)
+                val_rays_o, val_rays_d = val_rays_o.reshape(-1, 3), val_rays_d.reshape(-1, 3)
+                val_num_rays = val_rays_d.shape[0]
                 
                 # In MAML, the losses of a batch tasks were used to update meta parameter 
                 # but the batch of tasks in NeRF does not makes too much sense
@@ -304,7 +328,7 @@ def main():
                 for i in range(batch_size):
                     # update parameter with the inner loop loss
                     loss = MAML_inner_loop(meta_model, pixels, rays_o, rays_d, num_rays, bound, args.num_samples,
-                            args.train_batchsize, args.inner_steps, step_size, pbar)
+                            args.train_batchsize, args.inner_steps, step_size, val_pixels, val_rays_o, val_rays_d, val_num_rays)
                     
                     outer_loss += loss
                     
@@ -315,7 +339,8 @@ def main():
             meta_optim.step()
         
             if step % args.val_freq == 0 and step != args.resume_step:
-                train_psnrs.append((step, -10*torch.log10(outer_loss).detach().cpu()))
+                if args.meta == 'MAML':
+                    train_psnrs.append((step, -10*torch.log10(outer_loss).detach().cpu()))
                 
                 val_psnr = val_meta(args, meta_model, val_loader, device)
                 print(f"step: {step}, val psnr: {val_psnr:0.3f}")
@@ -338,9 +363,8 @@ def main():
                     'meta_optim_state_dict': meta_optim.state_dict(),
                     }, path)
             
-            if scheduler is not None:
+            if args.use_scheduler:
                 scheduler.step()
-                # pbar.set_postfix({"outer_lr" : scheduler.get_last_lr()[0]})
                 
             step += 1
             pbar.update(1)
