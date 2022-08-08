@@ -74,7 +74,9 @@ def get_rays_shapenet_mipNerf(hwf, poses):
     h, w, focal = hwf
     near = 2
     far = 6
-    
+
+    if poses.ndim == 2:
+        poses = poses.unsqueeze(dim=0)
 
     H, W, focal = hwf
     yy, xx = torch.meshgrid(torch.arange(0., H, device=focal.device),
