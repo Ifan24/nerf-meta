@@ -7,29 +7,74 @@ from torch.utils.data import DataLoader
 from datasets.shapenet import build_shapenet
 from models.nerf import build_nerf
 from models.rendering import get_rays_shapenet, sample_points, volume_render
+import nerfacc
 
 
+def compute_loss(model, num_rays, raybatch_size, rays_o, rays_d, pixels, bound):
+    
+    indices = torch.randint(num_rays, size=[raybatch_size])
+    raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
+    pixelbatch = pixels[indices] 
+    
+    
+    def sigma_fn(t_starts, t_ends, ray_indices):
+        """ 
+        Query density values from a user-defined radiance field.
+        :params t_starts: Start of the sample interval along the ray. (n_samples, 1).
+        :params t_ends: End of the sample interval along the ray. (n_samples, 1).
+        :params ray_indices: Ray indices that each sample belongs to. (n_samples,).
+        :returns The post-activation density values. (n_samples, 1).
+        """
+        t_origins = raybatch_o[ray_indices]  # (n_samples, 3)
+        t_dirs = raybatch_d[ray_indices]  # (n_samples, 3)
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        _, sigmas = model(positions)
+        return sigmas  # (n_samples, 1)
+    
+    def rgb_sigma_fn(t_starts, t_ends, ray_indices):
+        """ 
+        Query density values from a user-defined radiance field.
+        :params t_starts: Start of the sample interval along the ray. (n_samples, 1).
+        :params t_ends: End of the sample interval along the ray. (n_samples, 1).
+        :params ray_indices: Ray indices that each sample belongs to. (n_samples,).
+        :returns The post-activation density values. (n_samples, 1).
+        """
+        t_origins = raybatch_o[ray_indices]  # (n_samples, 3)
+        t_dirs = raybatch_d[ray_indices]  # (n_samples, 3)
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        rgbs, sigmas = model(positions)
+        
+        return rgbs, sigmas  # (n_samples, 3), (n_samples, 1)
+    
+    
+    # Efficient Raymarching: Skip empty and occluded space, pack samples from all rays.
+    # ray_indices: (n_samples,). t_starts: (n_samples, 1). t_ends: (n_samples, 1).
+    with torch.no_grad():
+        ray_indices, t_starts, t_ends = nerfacc.ray_marching(raybatch_o, raybatch_d, 
+            sigma_fn=sigma_fn, near_plane=bound[0], far_plane=bound[1], 
+            early_stop_eps=1e-4, alpha_thre=1e-2, stratified=True)
+    
+    
+    colors, opacity, depth = nerfacc.rendering(t_starts, t_ends, ray_indices, 
+            n_rays=rays_o.shape[0], rgb_sigma_fn=rgb_sigma_fn)
+
+    loss = F.mse_loss(colors, pixelbatch)
+    return loss
+        
+        
 def inner_loop(model, optim, imgs, poses, hwf, bound, num_samples, raybatch_size, inner_steps):
     """
     train the inner model for a specified number of iterations
     """
     pixels = imgs.reshape(-1, 3)
-
     rays_o, rays_d = get_rays_shapenet(hwf, poses)
     rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
 
     num_rays = rays_d.shape[0]
     for step in range(inner_steps):
-        indices = torch.randint(num_rays, size=[raybatch_size])
-        raybatch_o, raybatch_d = rays_o[indices], rays_d[indices]
-        pixelbatch = pixels[indices] 
-        t_vals, xyz = sample_points(raybatch_o, raybatch_d, bound[0], bound[1],
-                                    num_samples, perturb=True)
         
         optim.zero_grad()
-        rgbs, sigmas = model(xyz)
-        colors = volume_render(rgbs, sigmas, t_vals, white_bkgd=True)
-        loss = F.mse_loss(colors, pixelbatch)
+        loss = compute_loss(model, num_rays, raybatch_size, rays_o, rays_d, pixels, bound)
         loss.backward()
         optim.step()
 
